@@ -30,6 +30,16 @@ jobs:
           key: ${{ runner.os }}-multi-buildx-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-multi-buildx
+      
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Login to GCloud
+        run: |
+          echo ${{ env.GOOGLE_SERVICE_KEY }} | base64 -d > /tmp/key.json
+          gcloud auth activate-service-account --key-file=/tmp/key.json
+          gcloud --quiet config set project ${{ env.GOOGLE_PROJECT }}
+          gcloud auth print-access-token | docker login -u oauth2accesstoken --password-stdin ${{ env.DOCKER_REGISTRY }}
 
       - uses: mailerlite/gcloud-setup-deploy-action@v3.1.0
         with:
