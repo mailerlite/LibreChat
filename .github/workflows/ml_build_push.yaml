@@ -40,15 +40,6 @@ jobs:
           docker_file: "docker/Dockerfile"
           docker_build_extra: "--load --cache-from=type=local,src=/tmp/.buildx-cache --cache-to=type=local,mode=max,dest=/tmp/.buildx-cache-new"
 
-      - name: Slack Notification
-        uses: mailerlite/slack-notification-action@v4
-        with:
-          slack_webhook: ${{ secrets.SLACK_WEBHOOK }}
-          status: ${{ job.status }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        if: always()
-
       - name: Move cache
         run: |
           rm -rf /tmp/.buildx-cache
