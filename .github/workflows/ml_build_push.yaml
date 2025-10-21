@@ -7,6 +7,7 @@ on:
 name: Build
 
 env:
+  DOCKER_REGISTRY: ${{ secrets.DOCKER_REGISTRY }}
   DOCKER_REGISTRY_IMAGE: ${{ secrets.DOCKER_REGISTRY_IMAGE }}
   GOOGLE_PROJECT: ${{ secrets.GOOGLE_PROJECT }}
   GOOGLE_ZONE: ${{ secrets.GOOGLE_ZONE }}
@@ -16,31 +17,29 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_REGISTRY_IMAGE }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@master
-        with:
-          install: true
-
-      - name: Cache Docker layers
-        uses: actions/cache@v4
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-multi-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-multi-buildx
-
-      - uses: mailerlite/gcloud-setup-deploy-action@v3.1.0
-        with:
-          service_account_key: ${{ env.GOOGLE_SERVICE_KEY }}
-          project: ${{ env.GOOGLE_PROJECT }}
-          zone: ${{ env.GOOGLE_ZONE }}
-          docker_slug: ${{ env.DOCKER_REGISTRY_IMAGE }}
-          docker_file: "Dockerfile"
-          docker_build_extra: "--load --cache-from=type=local,src=/tmp/.buildx-cache --cache-to=type=local,mode=max,dest=/tmp/.buildx-cache-new"
-
-      - name: Move cache
+        uses: docker/setup-buildx-action@v3
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+      - name: Login to GCloud
         run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          echo ${{ env.GOOGLE_SERVICE_KEY }} | base64 -d > /tmp/key.json
+          gcloud auth activate-service-account --key-file=/tmp/key.json
+          gcloud --quiet config set project ${{ env.GOOGLE_PROJECT }}
+          gcloud auth print-access-token | docker login -u oauth2accesstoken --password-stdin ${{ env.DOCKER_REGISTRY }}
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.DOCKER_REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
