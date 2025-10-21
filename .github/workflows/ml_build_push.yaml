@@ -33,7 +33,7 @@ jobs:
 
       - uses: mailerlite/gcloud-setup-deploy-action@v3.1.0
         with:
-          service_account_key: ${{ env.GOOGLE_SERVICE_KEY_HUB }}
+          service_account_key: ${{ env.GOOGLE_SERVICE_KEY }}
           project: ${{ env.GOOGLE_PROJECT }}
           zone: ${{ env.GOOGLE_ZONE }}
           docker_slug: ${{ env.DOCKER_REGISTRY_IMAGE }}
