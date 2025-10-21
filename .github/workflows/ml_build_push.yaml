@@ -1,0 +1,56 @@
+---
+    on:
+      push:
+        tags:
+          - "v[0-9]+.[0-9]+.[0-9]+*"
+    
+    name: Build
+    
+    env:
+      DOCKER_REGISTRY_IMAGE: ${{ secrets.DOCKER_REGISTRY_IMAGE }}
+      GOOGLE_PROJECT: ${{ secrets.GOOGLE_PROJECT }}
+      GOOGLE_ZONE: ${{ secrets.GOOGLE_ZONE }}
+      GOOGLE_SERVICE_KEY: ${{ secrets.GOOGLE_SERVICE_KEY_HUB }}
+    
+    jobs:
+      build:
+        runs-on: ubuntu-24.04
+        steps:
+          - uses: actions/checkout@v5
+    
+          - name: Set up Docker Buildx
+            uses: docker/setup-buildx-action@master
+            with:
+              install: true
+    
+          - name: Cache Docker layers
+            uses: actions/cache@v4
+            with:
+              path: /tmp/.buildx-cache
+              key: ${{ runner.os }}-multi-buildx-${{ github.sha }}
+              restore-keys: |
+                ${{ runner.os }}-multi-buildx
+    
+          - uses: mailerlite/gcloud-setup-deploy-action@v3.1.0
+            with:
+              service_account_key: ${{ env.GOOGLE_SERVICE_KEY_HUB }}
+              project: ${{ env.GOOGLE_PROJECT }}
+              zone: ${{ env.GOOGLE_ZONE }}
+              docker_slug: ${{ env.DOCKER_REGISTRY_IMAGE }}
+              docker_file: "docker/Dockerfile"
+              docker_build_extra: "--load --cache-from=type=local,src=/tmp/.buildx-cache --cache-to=type=local,mode=max,dest=/tmp/.buildx-cache-new"
+    
+          - name: Slack Notification
+            uses: mailerlite/slack-notification-action@v4
+            with:
+              slack_webhook: ${{ secrets.SLACK_WEBHOOK }}
+              status: ${{ job.status }}
+            env:
+              GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            if: always()
+    
+          - name: Move cache
+            run: |
+              rm -rf /tmp/.buildx-cache
+              mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+    
