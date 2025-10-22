@@ -1,7 +1,9 @@
 const path = require('path');
 const winston = require('winston');
 require('winston-daily-rotate-file');
+const SentryTransport = require('winston-transport-sentry-node').default;
 const { redactFormat, redactMessage, debugTraverse, jsonTruncateFormat } = require('./parsers');
+const { Sentry, isSentryEnabled } = require('./sentry');
 
 const logDir = path.join(__dirname, '..', 'logs');
 
@@ -75,6 +77,38 @@ if (useDebugLogging) {
       format: winston.format.combine(fileFormat, debugTraverse),
     }),
   );
+}
+
+// Add Sentry transport for error tracking
+if (isSentryEnabled) {
+  try {
+    transports.push(
+      new SentryTransport({
+        sentry: Sentry,
+        level: 'error',
+        // Send errors and warnings to Sentry
+        levelsMap: {
+          silly: 'debug',
+          verbose: 'debug',
+          info: 'info',
+          debug: 'debug',
+          warn: 'warning',
+          error: 'error',
+        },
+        // Additional options
+        silent: false,
+        format: winston.format.combine(
+          winston.format.errors({ stack: true }),
+          winston.format.json(),
+        ),
+      }),
+    );
+    console.log('✓ Sentry transport added to Winston logger');
+  } catch (error) {
+    console.error('✗ Failed to add Sentry transport to Winston:', error.message);
+  }
+} else {
+  console.log('ℹ Sentry transport not added - Sentry is disabled');
 }
 
 const consoleFormat = winston.format.combine(

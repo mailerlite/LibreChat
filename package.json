@@ -155,5 +155,9 @@
       "admin/",
       "packages/"
     ]
+  },
+  "dependencies": {
+    "@sentry/node": "^8.55.0",
+    "winston-transport-sentry-node": "^3.0.0"
   }
 }
