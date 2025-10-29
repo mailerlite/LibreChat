@@ -22,9 +22,43 @@ const summaryBuffer = async ({
   previous_summary = '',
   prompt = SUMMARY_PROMPT,
   signal,
+  preserveToolCalls = false,
 }) => {
   if (previous_summary) {
     logger.debug('[summaryBuffer]', { previous_summary });
+  }
+
+  let toolCallSummary = '';
+  if(preserveToolCalls) {
+    const Constants = require('librechat-data-provider').Constants;
+    const toolCalls = context
+      .filter(msg => msg.tool_calls || msg.content?.some?.(c => c,type ===
+      'tool_call'))
+      .map(msg => {
+        const calls = msg.tool_calls ||
+          msg.content?.filter?.(c => c.type === 'tool_call') || [];
+
+        return calls.map(call => {
+          const isMCP = call.name?.includes?.(Constants.mcp_delimiter);
+          return {
+            name: call.name,
+            isMCP,
+            input: call.input,
+            output: call.output ?
+              (typeof call.output === 'string' ? call.output.slice(0, 200) :
+                JSON.stringify(call.output).slice(0, 200)) : null
+          };
+        });
+      })
+      .flat()
+      .filter(Boolean);
+
+    if(toolCalls.length > 0) {
+      toolCallSummary = '\n\nTool calls in this conversation:\n' +
+        toolCalls.map(tc =>
+          `-${tc.name}${tc.isMCP ? ' (MCP)' : ''}: ${tc.output || 'pending'}`
+        ).join('\n');
+    }
   }
 
   const formattedMessages = formatLangChainMessages(context, formatOptions);
@@ -60,7 +94,9 @@ const summaryBuffer = async ({
     logger.debug('[summaryBuffer]', { summary: predictSummary });
   }
 
-  return { role: 'system', content: predictSummary };
+  const finalSummary = predictSummary + toolCallSummary;
+
+  return { role: 'system', content: finalSummary };
 };
 
 module.exports = { createSummaryBufferMemory, summaryBuffer };
