@@ -1,4 +1,9 @@
 require('dotenv').config();
+
+// Initialize Sentry as early as possible
+const { initializeSentry, Sentry } = require('../config/sentry');
+const sentryInitialized = initializeSentry();
+
 const fs = require('fs');
 const path = require('path');
 require('module-alias')({ base: path.resolve(__dirname, '..') });
@@ -91,6 +96,13 @@ const startServer = async () => {
     console.warn('Response compression has been disabled via DISABLE_COMPRESSION.');
   }
 
+  // Add Sentry request handler - must be first middleware
+  if (sentryInitialized && Sentry && Sentry.Handlers) {
+    app.use(Sentry.Handlers.requestHandler());
+    // TracingHandler creates a trace for every incoming request
+    app.use(Sentry.Handlers.tracingHandler());
+  }
+
   app.use(staticCache(appConfig.paths.dist));
   app.use(staticCache(appConfig.paths.fonts));
   app.use(staticCache(appConfig.paths.assets));
@@ -145,6 +157,16 @@ const startServer = async () => {
   app.use('/api/tags', routes.tags);
   app.use('/api/mcp', routes.mcp);
 
+  // Add Sentry error handler - must be after routes but before ErrorController
+  if (sentryInitialized && Sentry && Sentry.Handlers) {
+    app.use(Sentry.Handlers.errorHandler({
+      shouldHandleError(error) {
+        // Capture all errors with status >= 400
+        return error.status >= 400 || !error.status;
+      },
+    }));
+  }
+
   app.use(ErrorController);
 
   app.use((req, res) => {
@@ -185,6 +207,16 @@ process.on('uncaughtException', (err) => {
     logger.error('There was an uncaught error:', err);
   }
 
+  // Capture the exception in Sentry before handling
+  if (sentryInitialized && Sentry && !err.message.includes('fetch failed') && !err.message.includes('abort')) {
+    Sentry.captureException(err, {
+      level: 'fatal',
+      tags: {
+        handler: 'uncaughtException',
+      },
+    });
+  }
+
   if (err.message.includes('abort')) {
     logger.warn('There was an uncatchable AbortController error.');
     return;
@@ -214,6 +246,25 @@ process.on('uncaughtException', (err) => {
   }
 
   process.exit(1);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  
+  if (sentryInitialized && Sentry) {
+    Sentry.captureException(reason, {
+      level: 'error',
+      tags: {
+        handler: 'unhandledRejection',
+      },
+      contexts: {
+        promise: {
+          promise: String(promise),
+        },
+      },
+    });
+  }
 });
 
 /** Export app for easier testing purposes */
