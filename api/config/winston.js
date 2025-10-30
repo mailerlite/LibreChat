@@ -103,7 +103,6 @@ if (isSentryEnabled) {
         ),
       }),
     );
-    console.log('✓ Sentry transport added to Winston logger');
   } catch (error) {
     console.error('✗ Failed to add Sentry transport to Winston:', error.message);
   }

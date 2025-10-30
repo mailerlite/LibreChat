@@ -107,7 +107,6 @@ function initializeSentry() {
       debug: NODE_ENV === 'development',
     });
 
-    console.log(`Sentry initialized successfully in ${SENTRY_ENVIRONMENT} environment`);
     return true;
   } catch (error) {
     console.error('Failed to initialize Sentry:', error);
