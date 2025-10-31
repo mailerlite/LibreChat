@@ -1,4 +1,4 @@
-require('events').EventEmitter.defaultMaxListeners = 100;
+  require('events').EventEmitter.defaultMaxListeners = 100;
 const { logger } = require('@librechat/data-schemas');
 const { DynamicStructuredTool } = require('@langchain/core/tools');
 const { getBufferString, HumanMessage } = require('@langchain/core/messages');
@@ -102,8 +102,17 @@ class AgentClient extends BaseClient {
      * @type {string} */
     this.clientName = EModelEndpoint.agents;
 
+    //Detect if MCP tools are in use
+    const hasMCPTools = options?.agent?.tools?.some(tool => {
+      tool.name?.includes?.(Constants.mcp_delimiter)
+    });
+
     /** @type {'discard' | 'summarize'} */
     this.contextStrategy = 'discard';
+
+    if(hasMCPTools) {
+      logger.debug('[AgentClient] MCP tools detected, using summarize context strategy');
+    }
 
     /** @deprecated @type {true} - Is a Chat Completion Request */
     this.isChatCompletion = true;
@@ -243,6 +252,65 @@ class AgentClient extends BaseClient {
       .join('\n')
       .trim();
 
+    // Calculate and reserve tokens for MCP instructions FIRST
+    let mcpInstructionsTokens = 0;
+    let mcpInstructions = '';
+    
+    const ephemeralAgent = this.options.req.body.ephemeralAgent;
+    let mcpServers = [];
+
+    // Check for ephemeral agent MCP servers
+    if (ephemeralAgent && ephemeralAgent.mcp && ephemeralAgent.mcp.length > 0) {
+      mcpServers = ephemeralAgent.mcp;
+    }
+    // Check for regular agent MCP tools
+    else if (this.options.agent && this.options.agent.tools) {
+      mcpServers = this.options.agent.tools
+        .filter(
+          (tool) =>
+            tool instanceof DynamicStructuredTool && tool.name.includes(Constants.mcp_delimiter),
+        )
+        .map((tool) => tool.name.split(Constants.mcp_delimiter).pop())
+        .filter(Boolean);
+    }
+
+    if (mcpServers.length > 0) {
+      try {
+        mcpInstructions = getMCPManager().formatInstructionsForContext(mcpServers);
+        if (mcpInstructions) {
+          // Calculate token cost of MCP instructions
+          mcpInstructionsTokens = this.getTokenCountForMessage({
+            role: 'system',
+            content: mcpInstructions
+          });
+          
+          logger.debug('[AgentClient] MCP instructions token cost:', {
+            servers: mcpServers,
+            tokens: mcpInstructionsTokens
+          });
+          
+          // Add to system content
+          systemContent = mcpInstructions + '\n\n' + systemContent;
+        }
+      } catch (error) {
+        logger.error('[AgentClient] Error formatting MCP instructions:', error);
+      }
+    }
+
+    // Adjust maxContextTokens to account for MCP instructions
+    const effectiveMaxContextTokens = this.maxContextTokens - mcpInstructionsTokens;
+    
+    logger.debug('[AgentClient] Context token allocation:', {
+      original: this.maxContextTokens,
+      mcpInstructions: mcpInstructionsTokens,
+      available: effectiveMaxContextTokens
+    });
+
+    // Use effectiveMaxContextTokens for truncation decisions
+    // Store original for restoration
+    const originalMaxContextTokens = this.maxContextTokens;
+    this.maxContextTokens = effectiveMaxContextTokens;
+
     if (this.options.attachments) {
       const attachments = await this.options.attachments;
       const latestMessage = orderedMessages[orderedMessages.length - 1];
@@ -324,36 +392,6 @@ class AgentClient extends BaseClient {
       systemContent = this.augmentedPrompt + systemContent;
     }
 
-    // Inject MCP server instructions if available
-    const ephemeralAgent = this.options.req.body.ephemeralAgent;
-    let mcpServers = [];
-
-    // Check for ephemeral agent MCP servers
-    if (ephemeralAgent && ephemeralAgent.mcp && ephemeralAgent.mcp.length > 0) {
-      mcpServers = ephemeralAgent.mcp;
-    }
-    // Check for regular agent MCP tools
-    else if (this.options.agent && this.options.agent.tools) {
-      mcpServers = this.options.agent.tools
-        .filter(
-          (tool) =>
-            tool instanceof DynamicStructuredTool && tool.name.includes(Constants.mcp_delimiter),
-        )
-        .map((tool) => tool.name.split(Constants.mcp_delimiter).pop())
-        .filter(Boolean);
-    }
-
-    if (mcpServers.length > 0) {
-      try {
-        const mcpInstructions = getMCPManager().formatInstructionsForContext(mcpServers);
-        if (mcpInstructions) {
-          systemContent = [systemContent, mcpInstructions].filter(Boolean).join('\n\n');
-          logger.debug('[AgentClient] Injected MCP instructions for servers:', mcpServers);
-        }
-      } catch (error) {
-        logger.error('[AgentClient] Failed to inject MCP instructions:', error);
-      }
-    }
 
     if (systemContent) {
       this.options.agent.instructions = systemContent;
@@ -392,6 +430,9 @@ class AgentClient extends BaseClient {
     if (systemContent) {
       this.options.agent.instructions = systemContent;
     }
+
+    // Restore original maxContextTokens after processing
+    this.maxContextTokens = originalMaxContextTokens;
 
     return result;
   }

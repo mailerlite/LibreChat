@@ -372,6 +372,47 @@ class BaseClient {
   }
 
   /**
+   * Assigns priority scores to messages based on content type and recency
+   * @param {TMessage[]} messages - Array of messages
+   * @returns {Array<{message: TMessage, priority: number, index: number}>}
+   */
+  assignMessagePriorities(messages) {
+    return messages.map((message, index) => {
+      let priority = 1.0; // Base priority
+
+      // Recency bonus (more recent = higher priority)
+      // Note: messages are ordered oldest to newest, so higher index = more recent
+      const recencyFactor = index / Math.max(messages.length - 1, 1);
+      priority += recencyFactor * 0.3;
+
+      // Check for tool calls
+      if (message.content && Array.isArray(message.content)) {
+        const hasToolCalls = message.content.some((item) => item.type === 'tool_call');
+        const hasMCPToolCalls = message.content.some(
+          (item) =>
+            item.type === 'tool_call' &&
+            item.tool_call?.name?.includes?.(Constants.mcp_delimiter),
+        );
+
+        if (hasToolCalls) {
+          priority += 0.5; // Tool calls are important
+        }
+
+        if (hasMCPToolCalls) {
+          priority += 0.3; // MCP tool calls are extra important
+        }
+      }
+
+      // User messages slightly higher priority than assistant
+      if (message.role === 'user') {
+        priority += 0.2;
+      }
+
+      return { message, priority, index };
+    });
+  }
+
+  /**
    * This method processes an array of messages and returns a context of messages that fit within a specified token limit.
    * It iterates over the messages from newest to oldest, adding them to the context until the token limit is reached.
    * If the token limit would be exceeded by adding a message, that message is not added to the context and remains in the original array.
@@ -395,42 +436,66 @@ class BaseClient {
     // start with 3 tokens for the label after all messages have been counted.
     let currentTokenCount = 3;
     const instructionsTokenCount = instructions?.tokenCount ?? 0;
-    let remainingContextTokens =
+    const maxTokensForContext =
       (maxContextTokens ?? this.maxContextTokens) - instructionsTokenCount;
-    const messages = [..._messages];
 
-    const context = [];
+    // Combine messages with instructions if instructions exist
+    const orderedMessages = instructions
+      ? this.addInstructions(_messages, instructions)
+      : [..._messages];
 
-    if (currentTokenCount < remainingContextTokens) {
-      while (messages.length > 0 && currentTokenCount < remainingContextTokens) {
-        if (messages.length === 1 && instructions) {
-          break;
-        }
-        const poppedMessage = messages.pop();
-        const { tokenCount } = poppedMessage;
+    // Assign priorities to messages (excluding instructions from priority calculation)
+    // Map original indices when instructions are present
+    const messagesToPrioritize = instructions ? orderedMessages.slice(1) : orderedMessages;
+    const prioritizedMessages = this.assignMessagePriorities(messagesToPrioritize).map((item) => ({
+      ...item,
+      originalIndex: instructions ? item.index + 1 : item.index, // Adjust index if instructions were added
+    }));
 
-        if (poppedMessage && currentTokenCount + tokenCount <= remainingContextTokens) {
-          context.push(poppedMessage);
-          currentTokenCount += tokenCount;
-        } else {
-          messages.push(poppedMessage);
-          break;
-        }
+    // Sort by priority (descending) but keep track of original order
+    const sortedByPriority = [...prioritizedMessages].sort((a, b) => b.priority - a.priority);
+
+    const selectedMessages = [];
+    const selectedOriginalIndices = new Set();
+
+    // Select messages based on priority until we hit token limit
+    for (const { message, originalIndex } of sortedByPriority) {
+      const tokenCount = message.tokenCount || 0;
+      if (currentTokenCount + tokenCount <= maxTokensForContext) {
+        selectedMessages.push({ message, originalIndex });
+        selectedOriginalIndices.add(originalIndex);
+        currentTokenCount += tokenCount;
       }
     }
 
+    // Re-sort by original order
+    selectedMessages.sort((a, b) => a.originalIndex - b.originalIndex);
+
+    const context = selectedMessages.map(({ message }) => message);
+    const messagesToRefine = prioritizedMessages
+      .filter(({ originalIndex }) => !selectedOriginalIndices.has(originalIndex))
+      .map(({ message }) => message);
+
+    // Add instructions back to context if they exist
     if (instructions) {
-      context.push(_messages[0]);
-      messages.shift();
+      context.unshift(instructions);
     }
 
-    const prunedMemory = messages;
-    remainingContextTokens -= currentTokenCount;
+    const remainingContextTokens = maxTokensForContext - currentTokenCount;
+
+    logger.debug('[BaseClient] Priority-based context selection:', {
+      total: _messages.length,
+      selected: context.length - (instructions ? 1 : 0),
+      refined: messagesToRefine.length,
+      tokenCount: currentTokenCount,
+      maxTokens: maxTokensForContext,
+      instructionsTokens: instructionsTokenCount,
+    });
 
     return {
-      context: context.reverse(),
+      context,
       remainingContextTokens,
-      messagesToRefine: prunedMemory,
+      messagesToRefine,
     };
   }
 
@@ -456,14 +521,25 @@ class BaseClient {
     }
 
     if (this.clientName === EModelEndpoint.agents) {
+      const hasMCPTools = this.options?.agent?.tools?.some(tool =>
+        tool.name?.includes?.(Constants.mcp_delimiter)
+      );
+
       const { dbMessages, editedIndices } = truncateToolCallOutputs(
         orderedMessages,
         this.maxContextTokens,
         this.getTokenCountForMessage.bind(this),
+        {
+          threshold: 0.75,
+          mcpPriorityBoost: hasMCPTools
+        }
       );
 
       if (editedIndices.length > 0) {
-        logger.debug('[BaseClient] Truncated tool call outputs:', editedIndices);
+        logger.debug('[BaseClient] Truncated tool call outputs:', {
+          indices: editedIndices,
+          stats
+        });
         for (const index of editedIndices) {
           formattedMessages[index].content = dbMessages[index].content;
         }
