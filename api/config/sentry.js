@@ -71,34 +71,113 @@ function initializeSentry() {
           event.request.query_string = queryString;
         }
 
-        // Add custom logic to filter or modify events
+        // Comprehensive check for MCP errors
+        // Winston transport may put messages in different places, so check all locations
+        const getErrorMessage = () => {
+          // Check event.message (string or object)
+          if (typeof event.message === 'string') {
+            return event.message;
+          }
+          if (typeof event.message === 'object' && event.message?.formatted) {
+            return event.message.formatted;
+          }
+          
+          // Check exception values
+          if (event.exception?.values?.[0]?.value) {
+            return event.exception.values[0].value;
+          }
+          
+          // Check extra/contexts (Winston may put log data here)
+          if (event.extra?.message) {
+            return event.extra.message;
+          }
+          if (event.contexts?.log?.message) {
+            return event.contexts.log.message;
+          }
+          
+          // Check original exception
+          if (hint?.originalException?.message) {
+            return hint.originalException.message;
+          }
+          
+          return '';
+        };
+
+        const errorMessage = getErrorMessage();
+        const isMCPError = errorMessage.includes('[MCP]');
+
+        // Allow MCP errors through - they're important for debugging
+        // If it's an MCP error, always capture it regardless of error type
+        if (isMCPError) {
+          // Add Sentry tags for better filtering and organization
+          event.tags = {
+            ...event.tags,
+            'mcp.error': true,
+          };
+
+          // Extract server name from error message if possible
+          const serverMatch = errorMessage.match(/\[MCP\](?:\[User: [^\]]+\])?\[([^\]]+)\]/);
+          if (serverMatch) {
+            event.tags['mcp.server'] = serverMatch[1];
+          }
+
+          // Extract tool name from error message if possible
+          const toolMatch = errorMessage.match(/\[([^\]]+)\]\s+(?:tool call failed|Error calling MCP tool)/i);
+          if (toolMatch) {
+            event.tags['mcp.tool'] = toolMatch[1];
+          }
+
+          // Extract user ID if present
+          const userMatch = errorMessage.match(/\[User:\s*([^\]]+)\]/);
+          if (userMatch) {
+            event.user = {
+              ...event.user,
+              id: userMatch[1],
+            };
+          }
+
+          return event;
+        }
+
+        // Filter non-MCP errors
         if (hint?.originalException?.message?.includes('fetch failed')) {
           // Don't send Meilisearch connection errors
           return null;
         }
 
-        // Only filter out actual AbortError, not all errors containing "abort"
-        if (hint?.originalException?.name === 'AbortError' ||
-            hint?.originalException?.message === 'This operation was aborted' ||
-            hint?.originalException?.message === 'The operation was aborted') {
-          // Don't send AbortController errors
+        // Filter out network errors only if they're NOT MCP-related
+        // Check error code from multiple possible locations
+        const errorCode = hint?.originalException?.code || 
+                         hint?.originalException?.errno;
+        // Also check if the error message contains network error codes
+        const hasNetworkErrorCode = errorMessage && 
+          ['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET'].some(code => 
+            errorMessage.includes(code)
+          );
+        
+        const networkErrors = ['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET'];
+        if ((errorCode && networkErrors.includes(errorCode)) || hasNetworkErrorCode) {
+          // Network error but not MCP-related - filter it out
+          return null;
+        }
+
+        // Only filter out actual AbortError from frontend AbortController, not transport errors
+        if (
+          hint?.originalException?.name === 'AbortError' ||
+          errorMessage === 'This operation was aborted' ||
+          errorMessage === 'The operation was aborted'
+        ) {
+          // Don't send frontend AbortController errors
           return null;
         }
 
         return event;
       },
 
-      // Don't capture these errors
+      // Minimal ignoreErrors - we handle filtering in beforeSend to allow MCP errors through
+      // Network errors are filtered in beforeSend only if they're not MCP-related
       ignoreErrors: [
-        // Network errors
-        'ECONNREFUSED',
-        'ENOTFOUND',
-        'ETIMEDOUT',
-        'ECONNRESET',
-        // AbortController errors
-        'AbortError',
-        'This operation was aborted',
-        // Common errors that don't need tracking
+        // Common errors that don't need tracking (non-MCP)
         'fetch failed',
         'GoogleGenerativeAI',
       ],
