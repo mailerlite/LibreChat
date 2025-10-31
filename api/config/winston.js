@@ -85,7 +85,7 @@ if (isSentryEnabled) {
     transports.push(
       new SentryTransport({
         sentry: Sentry,
-        level: 'error',
+        level: 'warn', // Capture warnings and errors
         // Send errors and warnings to Sentry
         levelsMap: {
           silly: 'debug',
